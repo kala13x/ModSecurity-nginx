@@ -336,6 +336,7 @@ ngx_conf_modsecurity_set_thread_pool_name(ngx_conf_t *cf, ngx_command_t *cmd, vo
     value++;
 
     tp = ngx_thread_pool_add(cf, value);
+    ngx_log_error(NGX_LOG_DEBUG, cf->log, 0, "[ModSecurity] Thread Pool Address: %p", tp);
     mcf->thread_pool = tp;
 
     return NGX_CONF_OK;
@@ -687,7 +688,7 @@ ngx_http_modsecurity_init_main_conf(ngx_conf_t *cf, void *conf)
     mmcf = (ngx_http_modsecurity_main_conf_t *)conf;
 
     ngx_log_error(NGX_LOG_NOTICE, cf->log, 0,
-                  "%s (rules loaded inline/local/remote: %ui/%ui/%ui)",
+                  "[ModSecurity] %s (rules loaded inline/local/remote: %ui/%ui/%ui)",
                   MODSECURITY_NGINX_WHOAMI, mmcf->rules_inline,
                   mmcf->rules_file, mmcf->rules_remote);
     ngx_log_error(NGX_LOG_NOTICE, cf->log, 0,
@@ -726,6 +727,7 @@ ngx_http_modsecurity_create_conf(ngx_conf_t *cf)
     conf->rules_set = msc_create_rules_set();
     conf->pool = cf->pool;
     conf->transaction_id = NGX_CONF_UNSET_PTR;
+    conf->thread_pool = ngx_thread_pool_add(cf, NULL);
 #if defined(MODSECURITY_SANITY_CHECKS) && (MODSECURITY_SANITY_CHECKS)
     conf->sanity_checks_enabled = NGX_CONF_UNSET;
 #endif

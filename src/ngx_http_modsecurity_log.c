@@ -49,7 +49,7 @@ ngx_http_modsecurity_log_handler(ngx_http_request_t *r)
     if (mcf == NULL || mcf->enable != 1)
     {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "ModSecurity not enabled... returning");
-        return NGX_OK;
+        return NGX_DECLINED;
     }
 
     /*
@@ -71,7 +71,7 @@ ngx_http_modsecurity_log_handler(ngx_http_request_t *r)
 
     if (ctx->logged) {
         ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "already logged earlier");
-        return NGX_OK;
+        return NGX_DECLINED;
     }
 
     dd("calling msc_process_logging for %p", ctx);
@@ -79,5 +79,5 @@ ngx_http_modsecurity_log_handler(ngx_http_request_t *r)
     msc_process_logging(ctx->modsec_transaction);
     ngx_http_modsecurity_pcre_malloc_done(old_pool);
 
-    return NGX_OK;
+    return NGX_DECLINED;
 }
