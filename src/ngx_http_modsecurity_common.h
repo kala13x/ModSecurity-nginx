@@ -21,6 +21,7 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
+#include <ngx_thread_pool.h>
 
 #include <modsecurity/modsecurity.h>
 #include <modsecurity/transaction.h>
@@ -116,6 +117,9 @@ typedef struct {
     /* RulesSet or Rules */
     void                      *rules_set;
 
+    ngx_str_t                  thread_pool_name;
+    ngx_thread_pool_t          *thread_pool;
+
     ngx_flag_t                 enable;
 #if defined(MODSECURITY_SANITY_CHECKS) && (MODSECURITY_SANITY_CHECKS)
     ngx_flag_t                 sanity_checks_enabled;
@@ -124,6 +128,11 @@ typedef struct {
     ngx_http_complex_value_t  *transaction_id;
 } ngx_http_modsecurity_conf_t;
 
+typedef struct {
+    ngx_http_modsecurity_ctx_t *ctx;
+    ngx_http_request_t *request;
+    ngx_int_t status;
+} ngx_http_modsecurity_task_ctx_t;
 
 typedef ngx_int_t (*ngx_http_modsecurity_resolv_header_pt)(ngx_http_request_t *r, ngx_str_t name, off_t offset);
 
