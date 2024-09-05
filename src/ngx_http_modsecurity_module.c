@@ -185,22 +185,15 @@ void ngx_http_modsecurity_cleanup(void *data)
 #endif
 }
 
-ngx_http_modsecurity_ctx_t *ngx_http_modsecurity_create_ctx(ngx_http_request_t *r)
+ngx_int_t ngx_http_modsecurity_create_transaction(ngx_http_modsecurity_ctx_t *ctx, ngx_http_request_t *r)
 {
-    ngx_http_modsecurity_ctx_t *ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_modsecurity_ctx_t));
-    if (ctx == NULL)
-    {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Failed to allocate memory for ModSecurity context");
-        return NULL;
-    }
-
     ngx_http_modsecurity_conf_t *mcf = ngx_http_get_module_loc_conf(r, ngx_http_modsecurity_module);
     ngx_http_modsecurity_main_conf_t *mmcf = ngx_http_get_module_main_conf(r, ngx_http_modsecurity_module);
 
     if (mcf->transaction_id)
     {
         ngx_str_t transaction_id_str;
-        if (ngx_http_complex_value(r, mcf->transaction_id, &transaction_id_str) != NGX_OK) return NGX_CONF_ERROR;
+        if (ngx_http_complex_value(r, mcf->transaction_id, &transaction_id_str) != NGX_OK) return -1;
 
         ctx->modsec_transaction = msc_new_transaction_with_id(mmcf->modsec, mcf->rules_set,
             (char *)transaction_id_str.data, r->connection->log);
@@ -210,13 +203,11 @@ ngx_http_modsecurity_ctx_t *ngx_http_modsecurity_create_ctx(ngx_http_request_t *
         ctx->modsec_transaction = msc_new_transaction(mmcf->modsec, mcf->rules_set, r->connection->log);
     }
 
-    ngx_http_set_ctx(r, ctx, ngx_http_modsecurity_module);
-
     ngx_pool_cleanup_t *cln = ngx_pool_cleanup_add(r->pool, 0);
     if (cln == NULL)
     {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Failed to create ModSecurity context cleanup");
-        return NGX_CONF_ERROR;
+        return -1;
     }
 
     cln->handler = ngx_http_modsecurity_cleanup;
@@ -224,10 +215,10 @@ ngx_http_modsecurity_ctx_t *ngx_http_modsecurity_create_ctx(ngx_http_request_t *
 
 #if defined(MODSECURITY_SANITY_CHECKS) && (MODSECURITY_SANITY_CHECKS)
     ctx->sanity_headers_out = ngx_array_create(r->pool, 12, sizeof(ngx_http_modsecurity_header_t));
-    if (ctx->sanity_headers_out == NULL) return NGX_CONF_ERROR;
+    if (ctx->sanity_headers_out == NULL) return -1;
 #endif
 
-    return ctx;
+    return 0;
 }
 
 char *
@@ -484,6 +475,7 @@ static void *ngx_http_modsecurity_create_main_conf(ngx_conf_t *cf)
     cln->data = conf;
     conf->pool = cf->pool;
     conf->modsec = msc_init();
+
     if (conf->modsec == NULL)
     {
         ngx_log_error(NGX_LOG_ERR, cf->log, 0, "Failed to initialize ModSecurity instance");

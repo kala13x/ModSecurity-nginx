@@ -25,141 +25,137 @@ void ngx_http_modsecurity_rewrite_task(void *data, ngx_log_t *log)
     ngx_http_modsecurity_ctx_t *ctx = task_ctx->ctx;
     ngx_http_request_t *r = task_ctx->request;
 
-    if (ctx == NULL)
+    ngx_int_t ret = ngx_http_modsecurity_create_transaction(ctx, r);
+    if (ret < 0)
     {
-        ctx = ngx_http_modsecurity_create_ctx(r);
-        if (ctx == NULL)
-        {
-            ngx_log_error(NGX_LOG_ERR, log, 0, "Failed to create ModSecurity context");
-            task_ctx->status = NGX_HTTP_INTERNAL_SERVER_ERROR;
-            return;
-        }
-        task_ctx->ctx = ctx;
+        ngx_log_error(NGX_LOG_ERR, log, 0, "Failed to create ModSecurity context");
+        task_ctx->status = NGX_HTTP_INTERNAL_SERVER_ERROR;
+        return;
+    }
 
-        task_ctx->ctx = ctx;
-        int client_port = ngx_inet_get_port(r->connection->sockaddr);
-        int server_port = ngx_inet_get_port(r->connection->local_sockaddr);
-        const char *client_addr = ngx_str_to_char(r->connection->addr_text, r->pool);
+    task_ctx->ctx = ctx;
+    int client_port = ngx_inet_get_port(r->connection->sockaddr);
+    int server_port = ngx_inet_get_port(r->connection->local_sockaddr);
+    const char *client_addr = ngx_str_to_char(r->connection->addr_text, r->pool);
 
-        if (client_addr == (char *)-1)
-        {
-            task_ctx->status = NGX_HTTP_INTERNAL_SERVER_ERROR;
-            return;
-        }
+    if (client_addr == (char *)-1)
+    {
+        task_ctx->status = NGX_HTTP_INTERNAL_SERVER_ERROR;
+        return;
+    }
 
-        ngx_str_t s;
-        u_char addr[NGX_SOCKADDR_STRLEN];
-        s.len = NGX_SOCKADDR_STRLEN;
-        s.data = addr;
+    ngx_str_t s;
+    u_char addr[NGX_SOCKADDR_STRLEN];
+    s.len = NGX_SOCKADDR_STRLEN;
+    s.data = addr;
 
-        if (ngx_connection_local_sockaddr(r->connection, &s, 0) != NGX_OK)
-        {
-            task_ctx->status = NGX_HTTP_INTERNAL_SERVER_ERROR;
-            return;
-        }
+    if (ngx_connection_local_sockaddr(r->connection, &s, 0) != NGX_OK)
+    {
+        task_ctx->status = NGX_HTTP_INTERNAL_SERVER_ERROR;
+        return;
+    }
 
-        const char *server_addr = ngx_str_to_char(s, r->pool);
-        if (server_addr == (char *)-1)
-        {
-            task_ctx->status = NGX_HTTP_INTERNAL_SERVER_ERROR;
-            return;
-        }
+    const char *server_addr = ngx_str_to_char(s, r->pool);
+    if (server_addr == (char *)-1)
+    {
+        task_ctx->status = NGX_HTTP_INTERNAL_SERVER_ERROR;
+        return;
+    }
 
-        ngx_pool_t *old_pool = ngx_http_modsecurity_pcre_malloc_init(r->pool);
-        int ret = msc_process_connection(ctx->modsec_transaction, client_addr, client_port, server_addr, server_port);
-        ngx_http_modsecurity_pcre_malloc_done(old_pool);
+    ngx_pool_t *old_pool = ngx_http_modsecurity_pcre_malloc_init(r->pool);
+    msc_process_connection(ctx->modsec_transaction, client_addr, client_port, server_addr, server_port);
+    ngx_http_modsecurity_pcre_malloc_done(old_pool);
 
-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0, "Processing connection intervention: %d", ret);
-        ret = ngx_http_modsecurity_process_intervention(ctx->modsec_transaction, r, 1);
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0, "Processing connection intervention: %d", ret);
+    ret = ngx_http_modsecurity_process_intervention(ctx->modsec_transaction, r, 1);
 
-        if (ret > 0)
-        {
-            ctx->intervention_triggered = 1;
-            task_ctx->status = ret;
-            return;
-        }
+    if (ret > 0)
+    {
+        ctx->intervention_triggered = 1;
+        task_ctx->status = ret;
+        return;
+    }
 
-        const char *http_version;
-        switch (r->http_version)
-        {
-            case NGX_HTTP_VERSION_9:
-                http_version = "0.9";
-                break;
-            case NGX_HTTP_VERSION_10:
-                http_version = "1.0";
-                break;
-            case NGX_HTTP_VERSION_11:
-                http_version = "1.1";
-                break;
+    const char *http_version;
+    switch (r->http_version)
+    {
+        case NGX_HTTP_VERSION_9:
+            http_version = "0.9";
+            break;
+        case NGX_HTTP_VERSION_10:
+            http_version = "1.0";
+            break;
+        case NGX_HTTP_VERSION_11:
+            http_version = "1.1";
+            break;
 #if defined(nginx_version) && nginx_version >= 1009005
-            case NGX_HTTP_VERSION_20:
-                http_version = "2.0";
-                break;
+        case NGX_HTTP_VERSION_20:
+            http_version = "2.0";
+            break;
 #endif
-            default:
-                http_version = ngx_str_to_char(r->http_protocol, r->pool);
-                if (http_version == (char *)-1)
-                {
-                    task_ctx->status = NGX_HTTP_INTERNAL_SERVER_ERROR;
-                    return;
-                }
-                http_version = (strncmp("HTTP/", http_version, 5) == 0) ? http_version + 5 : "1.0";
-                break;
-        }
-
-        const char *uri = ngx_str_to_char(r->unparsed_uri, r->pool);
-        const char *method = ngx_str_to_char(r->method_name, r->pool);
-
-        if (uri == (char *)-1 || method == (char *)-1)
-        {
-            task_ctx->status = NGX_HTTP_INTERNAL_SERVER_ERROR;
-            return;
-        }
-
-        old_pool = ngx_http_modsecurity_pcre_malloc_init(r->pool);
-        msc_process_uri(ctx->modsec_transaction, uri, method, http_version);
-        ngx_http_modsecurity_pcre_malloc_done(old_pool);
-
-        ret = ngx_http_modsecurity_process_intervention(ctx->modsec_transaction, r, 1);
-        if (ret > 0)
-        {
-            ctx->intervention_triggered = 1;
-            task_ctx->status = ret;
-            return;
-        }
-
-        ngx_list_part_t *part = &r->headers_in.headers.part;
-        ngx_table_elt_t *data = part->elts;
-
-        for (ngx_uint_t i = 0; /* void */; i++)
-        {
-            if (i >= part->nelts)
+        default:
+            http_version = ngx_str_to_char(r->http_protocol, r->pool);
+            if (http_version == (char *)-1)
             {
-                if (part->next == NULL) break;
-                part = part->next;
-                data = part->elts;
-                i = 0;
+                task_ctx->status = NGX_HTTP_INTERNAL_SERVER_ERROR;
+                return;
             }
+            http_version = (strncmp("HTTP/", http_version, 5) == 0) ? http_version + 5 : "1.0";
+            break;
+    }
 
-            ngx_log_error(NGX_LOG_DEBUG, log, 0, "Adding request header: %.*s with value %.*s",
-                (int)data[i].key.len, data[i].key.data, (int)data[i].value.len, data[i].value.data);
+    const char *uri = ngx_str_to_char(r->unparsed_uri, r->pool);
+    const char *method = ngx_str_to_char(r->method_name, r->pool);
 
-            msc_add_n_request_header(ctx->modsec_transaction,
-                (const unsigned char *)data[i].key.data, data[i].key.len,
-                (const unsigned char *)data[i].value.data, data[i].value.len);
-        }
+    if (uri == (char *)-1 || method == (char *)-1)
+    {
+        task_ctx->status = NGX_HTTP_INTERNAL_SERVER_ERROR;
+        return;
+    }
 
-        old_pool = ngx_http_modsecurity_pcre_malloc_init(r->pool);
-        msc_process_request_headers(ctx->modsec_transaction);
-        ngx_http_modsecurity_pcre_malloc_done(old_pool);
+    old_pool = ngx_http_modsecurity_pcre_malloc_init(r->pool);
+    msc_process_uri(ctx->modsec_transaction, uri, method, http_version);
+    ngx_http_modsecurity_pcre_malloc_done(old_pool);
 
-        ret = ngx_http_modsecurity_process_intervention(ctx->modsec_transaction, r, 1);
-        if (!r->error_page && ret > 0)
+    ret = ngx_http_modsecurity_process_intervention(ctx->modsec_transaction, r, 1);
+    if (ret > 0)
+    {
+        ctx->intervention_triggered = 1;
+        task_ctx->status = ret;
+        return;
+    }
+
+    ngx_list_part_t *part = &r->headers_in.headers.part;
+    ngx_table_elt_t *elts = part->elts;
+
+    for (ngx_uint_t i = 0; /* void */; i++)
+    {
+        if (i >= part->nelts)
         {
-            ctx->intervention_triggered = 1;
-            task_ctx->status = ret;
-            return;
+            if (part->next == NULL) break;
+            part = part->next;
+            elts = part->elts;
+            i = 0;
         }
+
+        ngx_log_error(NGX_LOG_DEBUG, log, 0, "Adding request header: %.*s with value %.*s",
+            (int)elts[i].key.len, elts[i].key.data, (int)elts[i].value.len, elts[i].value.data);
+
+        msc_add_n_request_header(ctx->modsec_transaction,
+            (const unsigned char *)elts[i].key.data, elts[i].key.len,
+            (const unsigned char *)elts[i].value.data, elts[i].value.len);
+    }
+
+    old_pool = ngx_http_modsecurity_pcre_malloc_init(r->pool);
+    msc_process_request_headers(ctx->modsec_transaction);
+    ngx_http_modsecurity_pcre_malloc_done(old_pool);
+
+    ret = ngx_http_modsecurity_process_intervention(ctx->modsec_transaction, r, 1);
+    if (!r->error_page && ret > 0)
+    {
+        ctx->intervention_triggered = 1;
+        task_ctx->status = ret;
+        return;
     }
 
     task_ctx->status = NGX_DECLINED;
@@ -201,31 +197,42 @@ ngx_int_t ngx_http_modsecurity_rewrite_handler(ngx_http_request_t *r)
     if (mcf == NULL || mcf->enable != 1) return NGX_DECLINED;
 
     ngx_http_modsecurity_ctx_t *ctx = ngx_http_get_module_ctx(r, ngx_http_modsecurity_module);
-    ngx_thread_task_t *task = ngx_thread_task_alloc(r->pool, sizeof(ngx_http_modsecurity_task_ctx_t));
-
-    if (task == NULL)
+    if (ctx == NULL)
     {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Failed to allocate thread task for ModSecurity");
-        return NGX_ERROR;
+        ngx_http_modsecurity_ctx_t *ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_modsecurity_ctx_t));
+        if (ctx == NULL)
+        {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Failed to allocate memory for ModSecurity context");
+            return NGX_ERROR;
+        }
+
+        ngx_http_set_ctx(r, ctx, ngx_http_modsecurity_module);
+        ngx_thread_task_t *task = ngx_thread_task_alloc(r->pool, sizeof(ngx_http_modsecurity_task_ctx_t));
+
+        if (task == NULL)
+        {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Failed to allocate thread task for ModSecurity");
+            return NGX_ERROR;
+        }
+
+        ngx_http_modsecurity_task_ctx_t *task_ctx = task->ctx;
+        task_ctx->request = r;
+        task_ctx->ctx = ctx;
+        task_ctx->status = NGX_DECLINED;
+
+        task->handler = ngx_http_modsecurity_rewrite_task;
+        task->event.handler = ngx_http_modsecurity_rewrite_finish;
+        task->event.data = task_ctx;
+
+        if (ngx_thread_task_post(mcf->thread_pool, task) != NGX_OK)
+        {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Failed to post rewrite task for ModSecurity");
+            return NGX_ERROR;
+        }
+
+        r->main->blocked++;
+        r->aio = 1;
     }
-
-    ngx_http_modsecurity_task_ctx_t *task_ctx = task->ctx;
-    task_ctx->request = r;
-    task_ctx->ctx = ctx;
-    task_ctx->status = NGX_DECLINED;
-
-    task->handler = ngx_http_modsecurity_rewrite_task;
-    task->event.handler = ngx_http_modsecurity_rewrite_finish;
-    task->event.data = task_ctx;
-
-    if (ngx_thread_task_post(mcf->thread_pool, task) != NGX_OK)
-    {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Failed to post rewrite task for ModSecurity");
-        return NGX_ERROR;
-    }
-
-    r->main->blocked++;
-    r->aio = 1;
 
     return NGX_DONE;
 }

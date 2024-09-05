@@ -52,7 +52,7 @@ ngx_int_t ngx_http_modsecurity_log_handler(ngx_http_request_t *r)
         "Logging request with ModSecurity, transaction: %p", ctx);
 
     ngx_pool_t *old_pool = ngx_http_modsecurity_pcre_malloc_init(r->pool);
-    msc_process_logging(ctx->modsec_transaction);
+    //msc_process_logging(ctx->modsec_transaction);
     ngx_http_modsecurity_pcre_malloc_done(old_pool);
 
     ctx->logged = 1;

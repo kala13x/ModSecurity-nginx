@@ -19,29 +19,13 @@
 #define MODSECURITY_DDEBUG 0
 #endif
 
-void ngx_http_modsecurity_request_read(ngx_http_request_t *r)
-{
-    ngx_http_modsecurity_ctx_t *ctx = ngx_http_get_module_ctx(r, ngx_http_modsecurity_module);
-
-#if defined(nginx_version) && nginx_version >= 8011
-    r->main->count--;
-#endif
-
-    if (ctx->waiting_more_body)
-    {
-        ctx->waiting_more_body = 0;
-        r->write_event_handler = ngx_http_core_run_phases;
-        ngx_http_core_run_phases(r);
-    }
-}
-
 void ngx_http_modsecurity_pre_access_task(void *data, ngx_log_t *log)
 {
     ngx_http_modsecurity_task_ctx_t *task_ctx = data;
     ngx_http_modsecurity_ctx_t *ctx = task_ctx->ctx;
     ngx_http_request_t *r = task_ctx->request;
 
-    ngx_int_t ret, already_inspected = 0, have_body = 0;
+    ngx_int_t ret, already_inspected = 0;
     ngx_chain_t *chain = r->request_body->bufs;
 
     if (r->request_body->temp_file != NULL)
@@ -56,43 +40,27 @@ void ngx_http_modsecurity_pre_access_task(void *data, ngx_log_t *log)
         }
 
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0, "Inspecting request body from file: %s", file_name);
-        have_body = msc_request_body_from_file(ctx->modsec_transaction, file_name);
+        msc_request_body_from_file(ctx->modsec_transaction, file_name);
         already_inspected = 1;
-    }
-    else
-    {
-        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, log, 0, "Inspecting request body in memory.");
     }
 
     while (chain && !already_inspected)
     {
         u_char *data = chain->buf->pos;
         msc_append_request_body(ctx->modsec_transaction, data, chain->buf->last - data);
-        have_body = 1;
 
         if (chain->buf->last_buf) break;
         chain = chain->next;
     }
 
-    if (!have_body)
-    {
-        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, log, 0, "No request body data to inspect.");
-        task_ctx->status = NGX_DECLINED;
-        return;
-    }
-
+    ngx_pool_t *old_pool = ngx_http_modsecurity_pcre_malloc_init(r->pool);
     msc_process_request_body(ctx->modsec_transaction);
-    ret = ngx_http_modsecurity_process_intervention(ctx->modsec_transaction, r, 0);
+    ngx_http_modsecurity_pcre_malloc_done(old_pool);
 
-    if (r->error_page)
+    ret = ngx_http_modsecurity_process_intervention(ctx->modsec_transaction, r, 0);    
+    if (r->error_page || ret > 0)
     {
-        task_ctx->status = NGX_DECLINED;
-        return;
-    }
-
-    if (ret > 0)
-    {
-        task_ctx->status = ret;
+        task_ctx->status = r->error_page ? NGX_DECLINED : ret;
         return;
     }
 
@@ -128,6 +96,45 @@ void ngx_http_modsecurity_pre_access_finish(ngx_event_t *ev)
     ngx_http_run_posted_requests(r->connection);
 }
 
+void ngx_http_modsecurity_body_callback(ngx_http_request_t *r)
+{
+    ngx_http_modsecurity_conf_t *mcf = ngx_http_get_module_loc_conf(r, ngx_http_modsecurity_module);
+    ngx_http_modsecurity_ctx_t *ctx = ngx_http_get_module_ctx(r, ngx_http_modsecurity_module);
+
+#if defined(nginx_version) && nginx_version >= 8011
+    r->main->count--;
+#endif
+
+    ngx_thread_task_t *task = ngx_thread_task_alloc(r->pool, sizeof(ngx_http_modsecurity_task_ctx_t));
+    if (task == NULL)
+    {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Failed to allocate task.");
+        ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+        return;
+    }
+
+    ngx_http_modsecurity_task_ctx_t *task_ctx = task->ctx;
+    task_ctx->request = r;
+    task_ctx->ctx = ctx;
+    task_ctx->status = NGX_DECLINED;
+
+    task->handler = ngx_http_modsecurity_pre_access_task;
+    task->event.handler = ngx_http_modsecurity_pre_access_finish;
+    task->event.data = task_ctx;
+
+    if (ngx_thread_task_post(mcf->thread_pool, task) != NGX_OK)
+    {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                    "Failed to post task to thread pool.");
+
+        ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+        return;
+    }
+
+    r->main->blocked++;
+    r->aio = 1;
+}
+
 ngx_int_t ngx_http_modsecurity_pre_access_handler(ngx_http_request_t *r)
 {
     ngx_http_modsecurity_conf_t *mcf = ngx_http_get_module_loc_conf(r, ngx_http_modsecurity_module);
@@ -136,14 +143,6 @@ ngx_int_t ngx_http_modsecurity_pre_access_handler(ngx_http_request_t *r)
     ngx_http_modsecurity_ctx_t *ctx = ngx_http_get_module_ctx(r, ngx_http_modsecurity_module);
     if (ctx == NULL) return NGX_HTTP_INTERNAL_SERVER_ERROR;
     if (ctx->intervention_triggered) return NGX_DECLINED;
-
-    if (ctx->waiting_more_body)
-    {
-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-            "Waiting for more body data, count: %d", r->main->count);
-
-        return NGX_DONE;
-    }
 
     if (!ctx->body_requested)
     {
@@ -161,7 +160,7 @@ ngx_int_t ngx_http_modsecurity_pre_access_handler(ngx_http_request_t *r)
             r->request_body_in_clean_file = 1;
         }
 
-        rc = ngx_http_read_client_request_body(r, ngx_http_modsecurity_request_read);
+        rc = ngx_http_read_client_request_body(r, ngx_http_modsecurity_body_callback);
         if (rc == NGX_ERROR || rc >= NGX_HTTP_SPECIAL_RESPONSE)
         {
 #if (nginx_version < 1002006) || (nginx_version >= 1003000 && nginx_version < 1003009)
@@ -169,48 +168,7 @@ ngx_int_t ngx_http_modsecurity_pre_access_handler(ngx_http_request_t *r)
 #endif
             return rc;
         }
-
-        if (rc == NGX_AGAIN)
-        {
-            ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Waiting for more data.");
-            ctx->waiting_more_body = 1;
-            return NGX_DONE;
-        }
     }
 
-    if (!ctx->waiting_more_body)
-    {
-        ngx_thread_task_t *task = ngx_thread_task_alloc(r->pool, sizeof(ngx_http_modsecurity_task_ctx_t));
-        if (task == NULL)
-        {
-            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Failed to allocate task.");
-            return NGX_ERROR;
-        }
-
-        ngx_http_modsecurity_task_ctx_t *task_ctx = task->ctx;
-        task_ctx->request = r;
-        task_ctx->ctx = ctx;
-        task_ctx->status = NGX_DECLINED;
-
-        task->handler = ngx_http_modsecurity_pre_access_task;
-        task->event.handler = ngx_http_modsecurity_pre_access_finish;
-        task->event.data = task_ctx;
-
-        if (ngx_thread_task_post(mcf->thread_pool, task) != NGX_OK)
-        {
-            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-                        "Failed to post task to thread pool.");
-
-            return NGX_ERROR;
-        }
-
-        r->main->blocked++;
-        r->aio = 1;
-        return NGX_DONE;
-    }
-
-    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                    "No intervention required, continuing.");
-
-    return NGX_DECLINED;
+    return NGX_DONE;
 }
