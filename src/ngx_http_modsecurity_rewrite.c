@@ -34,6 +34,7 @@ void ngx_http_modsecurity_rewrite_task(void *data, ngx_log_t *log)
             task_ctx->status = NGX_HTTP_INTERNAL_SERVER_ERROR;
             return;
         }
+        task_ctx->ctx = ctx;
 
         task_ctx->ctx = ctx;
         int client_port = ngx_inet_get_port(r->connection->sockaddr);
@@ -69,7 +70,7 @@ void ngx_http_modsecurity_rewrite_task(void *data, ngx_log_t *log)
         ngx_http_modsecurity_pcre_malloc_done(old_pool);
 
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0, "Processing connection intervention: %d", ret);
-        int ret = ngx_http_modsecurity_process_intervention(ctx->modsec_transaction, r, 1);
+        ret = ngx_http_modsecurity_process_intervention(ctx->modsec_transaction, r, 1);
 
         if (ret > 0)
         {
